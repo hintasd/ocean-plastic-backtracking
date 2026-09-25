@@ -71,6 +71,20 @@ WIND_SPEED_CAP_MPS = 35.0
 # 語意已由雙層 QC 架構取代（見 rk4_step_2d.get_uv）。
 SPEED_CAP_MPS = CURRENT_SPEED_CAP_MPS
 
+# ------------------------------------------------------------
+# Leeway 側風漂移係數 (Crosswind Drift Factor)
+# ------------------------------------------------------------
+# 完整 Leeway 模型（Allen et al., 2011）將風漂分解為「順風分量
+# (downwind)」與「側風分量 (crosswind)」兩部分：
+#     V_leeway = L_dw · W10 + L_cw · W10
+# 其中 L_dw 為順風係數（即本系統之 windage），L_cw 為側風係數。
+# 依 Allen et al. (2011) 之海上實驗，多數浮水物之側風係數約為
+# 順風係數之 10%~30%（取決於物體露出水面之形狀與受風面積）。
+# 本系統採保守中值 0.20，即側風漂移 = 0.20 × 順風漂移，方向為
+# 風向之右側 90°（北半球科氏力偏轉之簡化表徵）。
+# 設為 0.0 即退化為純順風線性風漂（與舊版行為完全一致）。
+LEEWAY_CROSSWIND_FACTOR_DEFAULT = 0.20
+
 AUTO_OFFSHORE_START_KM = 100.0
 AUTO_OFFSHORE_STEP_M = 500.0
 
@@ -1260,7 +1274,8 @@ def snap_to_valid_ocean(lon0, lat0, prov, max_km=AUTO_OFFSHORE_START_KM):
     # 吸附失敗：明確回報，不再靜默回傳陸地座標。
     return float(lon0), float(lat0), -1.0
 
-def rk4_step_2d(lon, lat, dt_seconds, prov, hours_elapsed, windage, time_offset_hours=0.0):
+def rk4_step_2d(lon, lat, dt_seconds, prov, hours_elapsed, windage, time_offset_hours=0.0,
+                crosswind_factor=LEEWAY_CROSSWIND_FACTOR_DEFAULT):
     # time_offset_hours 可為：
     #   - 純量：curr 與 wind 共用同一偏移（兩者時間軸一致時）
     #   - dict：{"curr": x, "wind": y}，分別指定各場偏移
@@ -1297,18 +1312,37 @@ def rk4_step_2d(lon, lat, dt_seconds, prov, hours_elapsed, windage, time_offset_
             w_spd = np.hypot(uw, vw)
             w_over = w_spd > WIND_SPEED_CAP_MPS
             w_scale = np.where(w_over, WIND_SPEED_CAP_MPS / (w_spd + 1e-12), 1.0)
+            # ========================================================
+            # Leeway 風漂：順風分量 (downwind) + 側風分量 (crosswind)
+            # ========================================================
+            # 順風分量：沿風向，係數 = windage（即 Leeway 順風係數 L_dw）。
+            uw_dw = uw * w_scale * windage
+            vw_dw = vw * w_scale * windage
+            # 側風分量：垂直風向（右偏 90°），係數 = windage × crosswind_factor
+            # （即 Leeway 側風係數 L_cw）。北半球風生漂流受科氏力影響
+            # 偏向風向之右側，此處以固定右偏 90° 作簡化表徵。
+            # 向量 (u, v) 右旋 90° 得 (-v, u)。
+            if crosswind_factor:
+                uw_cw = -vw * w_scale * windage * crosswind_factor
+                vw_cw = uw * w_scale * windage * crosswind_factor
+            else:
+                uw_cw = 0.0
+                vw_cw = 0.0
             # 風場以 windage 係數耦合為表面漂流分量（非直接疊加）。
-            uc = uc + uw * w_scale * windage
-            vc = vc + vw * w_scale * windage
+            uc = uc + uw_dw + uw_cw
+            vc = vc + vw_dw + vw_cw
 
         # ============================================================
         # 第二層：合成速度動態 QC（Composite Dynamic Envelope）
         #   上限由物理分量動態推導，而非硬編碼：
-        #     total_cap = V_curr_max + (windage * V_wind_max)
-        #   例：windage=0.015 → 3.0 + 0.015*35.0 = 3.525 m/s
-        #       windage=0.05  → 3.0 + 0.05 *35.0 = 4.75  m/s
+        #     total_cap = V_curr_max + windage * V_wind_max * sqrt(1 + L_cw^2)
+        #   順風與側風分量正交，合成風漂大小為
+        #     windage * V_wind * sqrt(1 + crosswind_factor^2)
+        #   例：windage=0.015, L_cw=0.20 → 3.0 + 0.015*35.0*1.0198 = 3.535 m/s
+        #       windage=0.05,  L_cw=0.20 → 3.0 + 0.05 *35.0*1.0198 = 4.785 m/s
         # ============================================================
-        total_cap = CURRENT_SPEED_CAP_MPS + windage * WIND_SPEED_CAP_MPS
+        wind_cap_factor = np.sqrt(1.0 + float(crosswind_factor) ** 2)
+        total_cap = CURRENT_SPEED_CAP_MPS + windage * WIND_SPEED_CAP_MPS * wind_cap_factor
         total_spd = np.hypot(uc, vc)
         over = total_spd > total_cap
         scale = np.where(over, total_cap / (total_spd + 1e-12), 1.0)
@@ -1580,6 +1614,7 @@ def run_sensitivity_sweep(param_name, param_values, base_kwargs, release_sites,
     param_name : str
         要掃描的參數名稱，支援：
           "windage"      → 海面風阻係數 (%)
+          "crosswind"    → Leeway 側風漂移係數（無因次，0~0.5）
           "local_radius" → 本地源關聯半徑 (km)
           "days"         → 回溯天數（會重算 total_steps）
           "dt_mins"      → 數值積分步長（會重算 total_steps）
@@ -1602,12 +1637,15 @@ def run_sensitivity_sweep(param_name, param_values, base_kwargs, release_sites,
     for val in param_values:
         # 依掃描參數決定本次模擬的實際設定。
         cur_windage = base_kwargs.get("windage", 1.5)
+        cur_crosswind = base_kwargs.get("crosswind_factor", LEEWAY_CROSSWIND_FACTOR_DEFAULT)
         cur_radius = local_radius_km
         cur_steps = total_steps
         cur_dt = dt_mins
 
         if param_name == "windage":
             cur_windage = float(val)
+        elif param_name == "crosswind":
+            cur_crosswind = float(val)
         elif param_name == "local_radius":
             cur_radius = float(val)
         elif param_name == "days":
@@ -1629,6 +1667,7 @@ def run_sensitivity_sweep(param_name, param_values, base_kwargs, release_sites,
             prov=prov,
             windage=cur_windage,
             reference_time_utc=reference_time_utc,
+            crosswind_factor=cur_crosswind,
         )
 
         if df is None or df.empty:
@@ -1660,6 +1699,41 @@ def run_sensitivity_sweep(param_name, param_values, base_kwargs, release_sites,
         })
 
     return pd.DataFrame(rows)
+
+
+def fig_to_png_bytes(fig, width=1400, height=800, scale=2):
+    """將 plotly 圖表轉為 PNG 位元組，供 st.download_button 下載。
+
+    為何需要此函式（研究成果匯出）：
+      復賽報告「研究成果」需附具體圖表。使用者可直接從系統匯出高解析度
+      PNG（scale=2 即 2 倍解析度，適合列印），無須手動截圖。
+
+    依賴：kaleido（plotly 靜態圖片引擎）。若未安裝則回傳 None，
+    呼叫端應顯示提示而非崩潰。
+    """
+    try:
+        return fig.to_image(format="png", width=width, height=height, scale=scale)
+    except Exception:
+        return None
+
+
+def render_figure_export(fig, filename, label="圖表", key=None):
+    """在 Streamlit 中渲染「下載此圖 PNG」按鈕。
+
+    若 kaleido 不可用，顯示提示訊息（不中斷頁面）。
+    """
+    png_bytes = fig_to_png_bytes(fig)
+    if png_bytes is None:
+        st.caption("⚠️ 圖表匯出需安裝 `kaleido`（`pip install kaleido`），目前無法產生 PNG。")
+        return
+    st.download_button(
+        f"⬇️ 下載{label} PNG (高解析度)",
+        data=png_bytes,
+        file_name=filename,
+        mime="image/png",
+        use_container_width=True,
+        key=key,
+    )
 
 
 def build_paths_from_history(history_lon, history_lat, step_idx, particle_indices, particle_sites=None, site_kind_map=None, max_particles=200):
@@ -1796,7 +1870,8 @@ def render_heatmap(final_df):
 # SIMULATION
 # ============================================================
 
-def simulate_particles(release_sites, total_particles, total_steps, dt_mins, prov, windage, reference_time_utc=None):
+def simulate_particles(release_sites, total_particles, total_steps, dt_mins, prov, windage,
+                       reference_time_utc=None, crosswind_factor=LEEWAY_CROSSWIND_FACTOR_DEFAULT):
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     rng = np.random.default_rng(42)
 
@@ -1925,7 +2000,8 @@ def simulate_particles(release_sites, total_particles, total_steps, dt_mins, pro
             lon_sub, lat_sub, mid_lons, mid_lats = rk4_step_2d(
                 lons[active_idx], lats[active_idx],
                 dt_seconds, prov, hours_elapsed, windage,
-                time_offset_hours={"curr": curr_offset_hours, "wind": wind_offset_hours}
+                time_offset_hours={"curr": curr_offset_hours, "wind": wind_offset_hours},
+                crosswind_factor=crosswind_factor,
             )
 
             # 時間越界（速度場已無有效資料）：rk4_step_2d 回傳 None。
@@ -2092,6 +2168,21 @@ windage_percent = st.sidebar.slider(
 )
 windage = windage_percent / 100.0
 
+# Leeway 側風漂移係數（crosswind factor）
+# 完整 Leeway 模型將風漂分為順風（downwind）與側風（crosswind）兩分量。
+# 側風係數約為順風係數之 10%~30%（Allen et al., 2011），預設 0.20。
+# 設為 0 即退化為純順風線性風漂。
+crosswind_factor = st.sidebar.slider(
+    "Leeway 側風漂移係數 (Crosswind Factor)",
+    min_value=0.0, max_value=0.5,
+    value=LEEWAY_CROSSWIND_FACTOR_DEFAULT, step=0.05,
+    help=(
+        "Leeway 模型之側風分量係數（相對順風分量之比例）。\n"
+        "依 Allen et al. (2011) 海上實驗，多數浮水物約為 0.10~0.30。\n"
+        "設為 0 即僅保留順風漂移（純線性風漂）。"
+    ),
+)
+
 need_wind = windage > 0.0
 
 # 嚴格載入 NODASS 數據庫
@@ -2242,7 +2333,7 @@ if st.sidebar.button("開始反向推演 (Start Simulation)", use_container_widt
         df, hist_lon, hist_lat, run_id, particle_sites = simulate_particles(
             release_sites=release_sites, total_particles=n_particles,
             total_steps=total_steps, dt_mins=dt_mins, prov=providers, windage=windage,
-            reference_time_utc=reference_time_utc
+            reference_time_utc=reference_time_utc, crosswind_factor=crosswind_factor
         )
 
     st.session_state["df"] = df
@@ -2428,6 +2519,7 @@ with tab2:
                 labels={"distance_km": "漂流距離 (km)", "count": "粒子數量"}
             )
             st.plotly_chart(fig_hist, use_container_width=True)
+            render_figure_export(fig_hist, "chart_travel_distance.png", label="漂流里程分佈圖", key="dl_hist")
 
         with col_fig2:
             fig_status = px.histogram(
@@ -2437,6 +2529,7 @@ with tab2:
                 color="final_status"
             )
             st.plotly_chart(fig_status, use_container_width=True)
+            render_figure_export(fig_status, "chart_particle_fate.png", label="粒子歸宿分佈圖", key="dl_status")
 
 # ============================================================
 # TAB 3 - 敏感度分析
@@ -2460,6 +2553,7 @@ with tab3:
                 "掃描參數 (Parameter to Sweep)",
                 [
                     "海面風阻係數 (Windage %)",
+                    "Leeway 側風漂移係數 (Crosswind Factor)",
                     "本地源關聯半徑 (Local Radius km)",
                     "回溯天數 (Days)",
                     "數值積分步長 (Time Step min)",
@@ -2486,6 +2580,12 @@ with tab3:
             _hi = min(5.0, _center + 1.5)
             _param_key = "windage"
             _unit = "%"
+        elif sens_param.startswith("Leeway"):
+            _center = float(crosswind_factor)
+            _lo = max(0.0, _center - 0.2)
+            _hi = min(0.5, _center + 0.2)
+            _param_key = "crosswind"
+            _unit = ""
         elif sens_param.startswith("本地源"):
             _center = float(local_source_radius_km)
             _lo = max(LOCAL_SOURCE_RADIUS_KM_MIN, _center - 10.0)
@@ -2523,7 +2623,8 @@ with tab3:
                 sens_df = run_sensitivity_sweep(
                     param_name=_param_key,
                     param_values=_sweep_values,
-                    base_kwargs={"windage": windage, "days": _requested_days, "dt_mins": dt_mins},
+                    base_kwargs={"windage": windage, "days": _requested_days, "dt_mins": dt_mins,
+                                 "crosswind_factor": crosswind_factor},
                     release_sites=_sens_sites,
                     total_particles=n_particles,
                     total_steps=total_steps,
@@ -2587,6 +2688,7 @@ with tab3:
                 height=420,
             )
             st.plotly_chart(fig_sens, use_container_width=True)
+            render_figure_export(fig_sens, "chart_sensitivity.png", label="敏感度曲線圖", key="dl_sens")
 
             # 掃描結果表格
             _tbl = sens_df.copy()

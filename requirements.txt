@@ -8,6 +8,7 @@
 streamlit>=1.40
 pydeck>=0.9
 plotly>=5.20
+kaleido>=0.2   # plotly 靜態圖片匯出（PNG/PDF），供研究成果圖表下載
 
 # --- 地理空間 / 海岸線遮罩 ---
 cartopy>=0.23
