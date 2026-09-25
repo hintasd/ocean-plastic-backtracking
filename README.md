@@ -12,11 +12,9 @@
 - [科學方法](#科學方法)
 - [系統架構](#系統架構)
 - [快速開始](#快速開始)
-- [資料準備](#資料準備)
 - [使用說明](#使用說明)
 - [驗證腳本](#驗證腳本)
 - [專案結構](#專案結構)
-- [常見問題](#常見問題)
 
 ---
 
@@ -108,7 +106,18 @@ pip install -r requirements.txt
 
 ### 2. 準備資料
 
-本專案需要 POM 海流與 WRF 風場資料，支援兩種佈局（見 [資料準備](#資料準備)）。
+本專案需要 POM 海流與 WRF 風場資料。請執行 `prepare_local_data.py` 從原始資料庫
+萃取精簡資料集（約 1.15 GB）：
+
+```bash
+python prepare_local_data.py
+```
+
+或設定環境變數指向原始資料庫：
+
+```powershell
+$env:PLASTIC_DATA_ROOT = "F:\20260907_塑源"
+```
 
 ### 3. 啟動應用
 
@@ -117,53 +126,6 @@ streamlit run ck.py
 ```
 
 瀏覽器會自動開啟 `http://localhost:8501`。
-
----
-
-## 資料準備
-
-系統支援兩種資料佈局，**優先使用精簡資料**：
-
-### (A) 精簡資料佈局（推薦）
-
-由 `prepare_local_data.py` 從原始資料庫萃取，只保留實際使用的欄位，約 **1.15 GB**：
-
-```
-slim_data/
-├── pom_currents_slim.nc   # POM 海流：us, vs, lat, lon, time
-└── wrf_wind_slim.nc       # WRF 風場：u10, v10, latitude, longitude, time
-```
-
-產生方式：
-
-```bash
-python prepare_local_data.py
-```
-
-### (B) 原始資料佈局
-
-完整 NODASS 資料庫，約 **424 GB**，通常位於外接硬碟：
-
-```
-<DATA_ROOT>/
-├── POM/2d/2025/12/pom_t3.YYYYMMDD00.2d.nc
-└── WRF/...
-```
-
-### 資料來源解析順序
-
-1. 環境變數 `PLASTIC_DATA_ROOT`（若指向含 `POM/` 的目錄）
-2. 專案內 `slim_data/`（若兩個精簡檔皆存在）
-3. 專案根目錄（若含 `POM/`）
-4. 硬編碼外接硬碟路徑 `F:\20260907_塑源`
-
-### 測試用 Mock 資料
-
-若無真實資料，可產生小型 mock 資料集進行功能測試：
-
-```bash
-python create_mock_pom.py
-```
 
 ---
 
@@ -197,14 +159,6 @@ python create_mock_pom.py
 | 腳本 | 驗證內容 | 結果 |
 |------|----------|------|
 | `verify_all_parameters.py` | 六層全參數驗證（資料層/時間索引/插值/RK4/軌跡） | 37/37 PASS |
-| `verify_simulation.py` | 獨立驗收：物理量探針、單步算子可逆性 | 12/12 PASS |
-| `verify_land_crossing_fix.py` | 跨格穿陸修復（黃金標準 0.2 km 採樣比對） | PASS |
-| `verify_no_land_crossing.py` | 實際模擬輸出零穿陸驗證 | PASS |
-| `verify_time_coverage_fix.py` | 時間凍結偽漂流修復 | 10/10 PASS |
-| `verify_strict_time_window.py` | 時間視窗嚴格檢查（越界直接報錯） | 10/10 PASS |
-| `verify_uncertainty_quantification.py` | Bootstrap CI 正確性（覆蓋率/收斂/顯著性） | 18/18 PASS |
-| `verify_sensitivity_analysis.py` | 敏感度掃描正確性（結構/單調/穩健性） | 20/20 PASS |
-| `verify_local_data.py` | 精簡資料與原始資料逐點數值一致 | PASS |
 
 執行方式：
 
@@ -220,63 +174,14 @@ python verify_all_parameters.py
 plastic/
 ├── ck.py                              # 主應用程式（Streamlit）
 ├── prepare_local_data.py              # 從原始資料萃取精簡資料集
-├── create_mock_pom.py                 # 產生測試用 mock 資料
+├── verify_all_parameters.py           # 全參數驗證
 ├── requirements.txt                   # Python 依賴
 ├── README.md                          # 本文件
 ├── .gitignore                         # Git 忽略規則
 │
-├── verify_all_parameters.py           # 全參數驗證
-├── verify_simulation.py               # 獨立驗收驗證
-├── verify_land_crossing_fix.py        # 跨格穿陸修復驗證
-├── verify_no_land_crossing.py         # 零穿陸驗證
-├── verify_time_coverage_fix.py        # 時間覆蓋修復驗證
-├── verify_strict_time_window.py       # 時間視窗嚴格檢查驗證
-├── verify_uncertainty_quantification.py  # 不確定性量化驗證
-├── verify_sensitivity_analysis.py     # 敏感度分析驗證
-├── verify_local_data.py               # 精簡資料一致性驗證
-│
-├── slim_data/                         # 精簡資料集（.gitignore 排除）
-│   ├── pom_currents_slim.nc
-│   └── wrf_wind_slim.nc
-└── mock_pom_taiwan.nc                 # 測試用 mock 資料（.gitignore 排除）
-```
-
----
-
-## 常見問題
-
-### Q: 啟動時顯示「找不到 POM 海流檔案」？
-
-請確認資料佈局正確。最簡單的方式是執行 `prepare_local_data.py` 產生 `slim_data/`，
-或設定環境變數：
-
-```bash
-# Windows PowerShell
-$env:PLASTIC_DATA_ROOT = "F:\20260907_塑源"
-```
-
-### Q: 為什麼粒子會「一步跳很遠」？
-
-請檢查**風阻係數單位**。系統內部使用**小數**（`0.015` = 1.5%），
-若誤傳百分比（`1.5`）會放大風速 100 倍，導致粒子一步跳 35 km 直接越界。
-
-### Q: 敏感度分析顯示「結論不穩健」是什麼意思？
-
-代表「本地源佔比」在掃描範圍內**跨越 50%**，即來源判定會隨該參數改變而翻盤。
-這表示結論對該參數敏感，需要更精確的參數估計才能下定論。
-
-### Q: 為什麼回溯天數越長，結果反而不同？
-
-系統採用**嚴格時間視窗檢查**：若回溯起點超出資料涵蓋範圍，會直接報錯而非自動平移。
-請確認回溯天數與起算日期落在資料範圍內。
-
-### Q: Windows 終端機中文亂碼？
-
-設定 UTF-8 輸出：
-
-```powershell
-$env:PYTHONIOENCODING="utf-8"
-[Console]::OutputEncoding=[System.Text.Encoding]::UTF8
+└── slim_data/                         # 精簡資料集（.gitignore 排除）
+    ├── pom_currents_slim.nc
+    └── wrf_wind_slim.nc
 ```
 
 ---
