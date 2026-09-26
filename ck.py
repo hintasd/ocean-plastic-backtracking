@@ -1,4 +1,3 @@
-import glob
 import os
 import uuid
 import warnings
@@ -89,58 +88,21 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() 
 # ------------------------------------------------------------
 # 資料來源解析 (Data Source Resolution)
 # ------------------------------------------------------------
-# 支援兩種資料佈局，優先使用「本機精簡資料」：
+# 本系統僅使用「本機精簡資料」(slim_data/)：
+#   由 prepare_local_data.py 從原始 NODASS 資料庫萃取，
+#   只保留專案實際使用的欄位（POM us/vs、WRF u10/v10），
+#   約 1.15 GB，可完整存放於本機，無需外接硬碟。
+#   檔案：slim_data/pom_currents_slim.nc、slim_data/wrf_wind_slim.nc
 #
-#   (A) 精簡資料 (slim_data/)：由 prepare_local_data.py 從原始資料庫萃取，
-#       只保留專案實際使用的欄位（POM us/vs、WRF u10/v10），
-#       約 1.15 GB，可完整存放於本機，無需外接硬碟。
-#       檔案：slim_data/pom_currents_slim.nc、slim_data/wrf_wind_slim.nc
-#
-#   (B) 原始資料庫 (POM/ + WRF/)：完整 NODASS 資料，約 424 GB，
-#       通常位於外接硬碟（例如 F:\20260907_塑源）。
-#
-# 解析順序：
-#   1. 環境變數 PLASTIC_DATA_ROOT（若指向含 POM/ 的目錄 → 原始佈局）
-#   2. 專案內 slim_data/（若兩個精簡檔皆存在 → 精簡佈局）
-#   3. 專案根目錄（若含 POM/ → 原始佈局）
-#   4. 硬編碼外接硬碟路徑 F:\20260907_塑源
+# 設計取捨：不再支援原始資料庫佈局（POM/ + WRF/，約 424 GB）。
+#   原因：原始佈局需合併 31 個 POM 檔並解析 124 個 GRIB2，
+#   載入耗時數十秒至數分鐘，且依賴外接硬碟路徑，部署脆弱。
+#   精簡資料已由 verify_local_data.py 逐點驗證與原始資料一致
+#   （最大絕對誤差 <= 1e-5），故直接以精簡資料為唯一來源。
 # ------------------------------------------------------------
-configured_data_root = os.environ.get("PLASTIC_DATA_ROOT")
-
 SLIM_DIR = os.path.join(BASE_DIR, "slim_data")
 SLIM_POM_FILE = os.path.join(SLIM_DIR, "pom_currents_slim.nc")
 SLIM_WRF_FILE = os.path.join(SLIM_DIR, "wrf_wind_slim.nc")
-
-
-def _has_slim_data():
-    """精簡資料需兩個檔案同時存在才視為可用。"""
-    return os.path.isfile(SLIM_POM_FILE) and os.path.isfile(SLIM_WRF_FILE)
-
-
-def _has_raw_data(path):
-    return bool(path) and os.path.isdir(os.path.join(path, "POM"))
-
-
-# 決定資料佈局：精簡優先，其次原始。
-if _has_raw_data(configured_data_root):
-    DATA_MODE = "raw"
-    DATA_ROOT = configured_data_root
-elif _has_slim_data():
-    DATA_MODE = "slim"
-    DATA_ROOT = SLIM_DIR
-elif _has_raw_data(BASE_DIR):
-    DATA_MODE = "raw"
-    DATA_ROOT = BASE_DIR
-elif _has_raw_data(r"F:\20260907_塑源"):
-    DATA_MODE = "raw"
-    DATA_ROOT = r"F:\20260907_塑源"
-else:
-    # 皆不可用：維持原始佈局語意，讓後續載入器給出明確錯誤訊息。
-    DATA_MODE = "raw"
-    DATA_ROOT = BASE_DIR
-
-POM_DIR = os.path.join(DATA_ROOT, "POM")
-WRF_DIR = os.path.join(DATA_ROOT, "WRF")
 
 STATUS_ACTIVE = 0
 STATUS_BEACHED = 1
@@ -503,27 +465,8 @@ def build_public_coastline_mask(lat, lon, return_geometry=False):
     return mask
 
 # ============================================================
-# DATA PROVIDERS (STRICT POM & WRF LOADERS - CRITICAL BUGFIX)
+# DATA PROVIDERS (SLIM DATA LOADER)
 # ============================================================
-
-def robust_spatial_subset(ds, lat_name, lon_name, lat_min, lat_max, lon_min, lon_max):
-    if lat_name is None or lon_name is None:
-        return None
-
-    lat_vals = ds[lat_name].values
-    lon_vals = ds[lon_name].values
-
-    if len(lat_vals) == 0 or len(lon_vals) == 0 or lat_vals.ndim > 1 or lon_vals.ndim > 1:
-        return None
-
-    lat_slice = slice(lat_max, lat_min) if lat_vals[0] > lat_vals[-1] else slice(lat_min, lat_max)
-
-    lon_min_adj = lon_min % 360 if lon_vals.max() > 180 else lon_min
-    lon_max_adj = lon_max % 360 if lon_vals.max() > 180 else lon_max
-    lon_slice = slice(lon_max_adj, lon_min_adj) if lon_vals[0] > lon_vals[-1] else slice(lon_min_adj, lon_max_adj)
-
-    return ds.sel({lat_name: lat_slice, lon_name: lon_slice})
-
 
 def _build_providers_from_slim(need_wind, open_nc, landmask_from_velocity):
     """從本機精簡資料集 (slim_data/) 建立速度場提供者。
@@ -532,11 +475,11 @@ def _build_providers_from_slim(need_wind, open_nc, landmask_from_velocity):
       - pom_currents_slim.nc : us, vs, lat, lon, time
       - wrf_wind_slim.nc     : u10, v10, latitude, longitude, time
 
-    與原始資料路徑的差異：
-      - 不需合併 31 個 POM 檔，直接讀取單一檔案（載入時間由數十秒降至秒級）
-      - 不需解析 124 個 GRIB2，直接讀取單一 NetCDF
-      - 海陸遮罩仍以 Cartopy Natural Earth 10m 幾何多邊形為最高準則，
-        與原始路徑完全一致，確保陸地判定行為不變。
+    設計要點：
+      - 直接讀取單一 NetCDF，載入時間為秒級（無需合併 31 個 POM 檔、
+        亦無需解析 124 個 GRIB2）。
+      - 海陸遮罩以 Cartopy Natural Earth 10m 幾何多邊形為最高準則，
+        確保陸地判定不受 POM 網格解析度（0.02° ≈ 2.2 km）限制。
     """
     # ---------------- POM 海流 ----------------
     if not os.path.isfile(SLIM_POM_FILE):
@@ -739,14 +682,6 @@ def build_velocity_providers(need_wind=False):
         )
         st.stop()
 
-    def _extract_mask_array(ds, name):
-        if not name or name not in ds:
-            return None
-        values = np.asarray(ds[name].values)
-        while values.ndim > 2:
-            values = values[0]
-        return values if values.ndim == 2 else None
-
     def _landmask_from_velocity(u_values, v_values):
         u_arr = np.asarray(u_values, dtype=np.float32)
         v_arr = np.asarray(v_values, dtype=np.float32)
@@ -798,304 +733,12 @@ def build_velocity_providers(need_wind=False):
     # ============================================================
     # 精簡資料載入路徑 (Slim Data Path)
     # ============================================================
-    # 當偵測到 slim_data/ 時，直接讀取已萃取、已壓縮的單一 NetCDF，
+    # 本系統唯一資料來源：直接讀取已萃取、已壓縮的單一 NetCDF，
     # 跳過「合併 31 個 POM 檔 + 解析 124 個 GRIB2」的昂貴流程。
     # 精簡資料由 prepare_local_data.py 產生，並經 verify_local_data.py
     # 逐點驗證與原始資料一致（最大絕對誤差 <= 1e-5）。
     # ============================================================
-    if DATA_MODE == "slim":
-        return _build_providers_from_slim(need_wind, _open_nc, _landmask_from_velocity)
-
-    # POM is daily-file data: combine every file, then sort and de-duplicate time.
-    pom_2d_dir = os.path.join(POM_DIR, "2d")
-    pom_search_dir = pom_2d_dir if os.path.isdir(pom_2d_dir) else POM_DIR
-    pom_files = glob.glob(os.path.join(pom_search_dir, "**", "*.nc"), recursive=True)
-    if not pom_files:
-        st.error(f"找不到 POM 海流檔案：`{pom_search_dir}` 下沒有 .nc 檔案。")
-        st.stop()
-    pom_files = sorted(pom_files)
-    ocean_path = pom_files[0]
-    try:
-        pom_datasets = [_open_nc(path) for path in pom_files]
-        sample = pom_datasets[0]
-        names = list(sample.variables)
-        lat_name = _pick_first_from_candidates(["lat", "latitude", "lat_rho", "y"], names)
-        lon_name = _pick_first_from_candidates(["lon", "longitude", "lon_rho", "x"], names)
-        u_name = _pick_first_from_candidates(["us", "u", "water_u", "u_eastward"], names)
-        v_name = _pick_first_from_candidates(["vs", "v", "water_v", "v_northward"], names)
-        time_name = _pick_first_from_candidates(["time", "ocean_time", "valid_time"], names)
-        if not all([lat_name, lon_name, u_name, v_name, time_name]):
-            raise ValueError(
-                "POM 缺少必要欄位；"
-                f"目前欄位={names}，需要經緯度、U/V 海流和時間座標。"
-            )
-        ocean_time_name = time_name
-        ocean_u_name = u_name
-        ocean_v_name = v_name
-        for depth in ["depth", "z", "lev", "level"]:
-            if depth in sample.dims:
-                pom_datasets = [d.isel({depth: 0}) for d in pom_datasets]
-                break
-        # 每个 POM 档案还包含 ele/wx/wy/slp/sla 等非模拟变量。
-        # 合并前只保留速度、网格和时间，避免启动时无意义地占用数 GB 内存。
-        required_pom_names = [u_name, v_name, lat_name, lon_name, time_name]
-        pom_datasets = [
-            dataset[required_pom_names]
-            for dataset in pom_datasets
-        ]
-        try:
-            ds_ocean = xr.combine_by_coords(pom_datasets, combine_attrs="override")
-        except Exception:
-            ds_ocean = xr.concat(pom_datasets, dim=time_name, data_vars="minimal", coords="minimal", compat="override", join="override")
-        if time_name not in ds_ocean.coords:
-            raise ValueError(f"POM 时间坐标 `{time_name}` 合并后不存在")
-        ds_ocean = ds_ocean.sortby(time_name)
-        time_values = pd.to_datetime(np.asarray(ds_ocean[time_name].values))
-        keep = ~pd.Index(time_values).duplicated(keep="first")
-        ds_ocean = ds_ocean.isel({time_name: np.flatnonzero(keep)})
-        ocean_dt_hours = _infer_step_hours(ds_ocean[time_name])
-        reference_time = _safe_time_to_datetime(ds_ocean[time_name].max().values)
-        ds_sub = robust_spatial_subset(ds_ocean, lat_name, lon_name, 18, 30, 115, 130)
-        if ds_sub is not None:
-            ds_ocean = ds_sub
-        lat = np.asarray(ds_ocean[lat_name].values, dtype=np.float32)
-        lon = np.asarray(ds_ocean[lon_name].values, dtype=np.float32)
-        u_var, v_var = ds_ocean[u_name], ds_ocean[v_name]
-        u = _as_time_space_array(u_var).astype(np.float32)
-        v = _as_time_space_array(v_var).astype(np.float32)
-        if u.shape != v.shape:
-            raise ValueError(f"POM U/V 空間形狀不一致：{u.shape} / {v.shape}")
-        if lat.ndim == 1 and lon.ndim == 1:
-            if lat[0] > lat[-1]:
-                lat, u, v = lat[::-1], np.flip(u, 1), np.flip(v, 1)
-            if lon[0] > lon[-1]:
-                lon, u, v = lon[::-1], np.flip(u, 2), np.flip(v, 2)
-        mask_name = _pick_first_from_candidates(["mask_rho", "mask", "land_mask", "landmask", "wet_mask"], names)
-        landmask = _extract_mask_array(ds_ocean, mask_name)
-        landmask_source = "POM official mask"
-        landmask_confidence = "high"
-
-        # 幾何多邊形（Natural Earth 10m 陸地）為台灣陸地判定的最高準則。
-        # 優先建立幾何遮罩，避免 POM 官方 mask 在港灣/靜水區的解析度不足。
-        #
-        # 同時保存原始幾何物件（land_geometry），供 is_land_vectorized 直接
-        # 對粒子座標做 contains 查詢。這是必要的：網格遮罩受 POM 解析度
-        # （0.02° ≈ 2.2 km）限制，會漏判寬度小於 2.2 km 的岬角與港口，
-        # 導致粒子「碰到陸地但沒停」。
-        geometric_mask = None
-        land_geometry = None
-        try:
-            geometric_mask, land_geometry = build_public_coastline_mask(lat, lon, return_geometry=True)
-        except (FileNotFoundError, ImportError, RuntimeError, ValueError) as geo_exc:
-            geometric_mask = None
-            land_geometry = None
-            geometric_exc = geo_exc
-
-        if geometric_mask is not None:
-            landmask = geometric_mask
-            landmask_source = "Cartopy Natural Earth 10m local land polygons (geometric priority)"
-            landmask_confidence = "high"
-        elif landmask is not None:
-            raw_mask = np.asarray(landmask, dtype=np.float32)
-            finite_mask = raw_mask[np.isfinite(raw_mask)]
-            if finite_mask.size == 0:
-                raise ValueError(f"海陆遮罩 `{mask_name}` 没有有效数值")
-            unique_values = np.unique(finite_mask)
-            if mask_name.lower() in {"land_mask", "landmask"}:
-                landmask = raw_mask > 0.5
-            elif np.all(np.isin(unique_values, [0.0, 1.0])):
-                # POM/ROMS 常用 wet mask：1=水域，0=陆地。
-                landmask = raw_mask < 0.5
-            else:
-                landmask = ~np.isfinite(raw_mask) | (np.abs(raw_mask) > 1e20)
-            landmask_source = f"POM official mask `{mask_name}` (geometric unavailable: {geometric_exc})"
-            landmask_confidence = "medium"
-        else:
-            # 低信度 fallback：僅在幾何與官方遮罩皆缺失時使用。
-            # 注意：POM 慣例為陸地 u=v=0，但港灣/靜水亦可能為 0，
-            # 因此此遮罩僅視為低信度，並在 UI 明確標示。
-            landmask = _landmask_from_velocity(u, v)
-            landmask_source = f"POM velocity finite-value fallback (low confidence: {geometric_exc})"
-            landmask_confidence = "low"
-
-        # 嚴禁靜默降級為「全海洋」遮罩：形狀不符時直接報錯，
-        # 避免所有粒子被誤判為外海漂流而產生偽軌跡。
-        if landmask.shape != u.shape[1:]:
-            raise ValueError(
-                f"海陆遮罩形状 {landmask.shape} 与流速场空间形状 {u.shape[1:]} 不一致，"
-                "无法安全进行陆地判定；请检查 POM 网格与遮罩来源。"
-            )
-        curr = {"lat": lat, "lon": lon, "u": np.nan_to_num(u), "v": np.nan_to_num(v), "landmask": landmask,
-                "landmask_source": landmask_source,
-                "landmask_confidence": landmask_confidence,
-                "land_geometry": land_geometry,
-                "bbox": (float(np.nanmin(lon)), float(np.nanmax(lon)), float(np.nanmin(lat)), float(np.nanmax(lat))),
-                "n_times": u.shape[0], "dt_hours": ocean_dt_hours, "reference_time_utc": reference_time,
-                "time_interval_hours": ocean_dt_hours,
-                "missing_fraction": float(np.mean(~np.isfinite(u) | ~np.isfinite(v))),
-                "max_speed_mps": float(np.nanmax(np.hypot(u, v)))}
-    except Exception as exc:
-        st.error(
-            f"POM 海流读取失败（发现 {len(pom_files)} 个档案）。"
-            f"请检查 NetCDF 格式、时间坐标和 U/V 维度。详细错误：{exc}"
-        )
-        st.stop()
-
-    wind_data = None
-    wind_path = None
-    if need_wind:
-        wrf_files = [f for f in glob.glob(os.path.join(WRF_DIR, "**", "*"), recursive=True)
-                     if os.path.isfile(f) and f.lower().endswith((".grib2", ".grib", ".grb", ".gri")) and not f.lower().endswith(".idx")]
-        if not wrf_files:
-            st.error(f"找不到 WRF 风场档案：`{WRF_DIR}` 下没有 GRIB2 文件。")
-            st.stop()
-
-        # WRF 资料按「预报循环 + 预报时效」拆成大量 GRIB2。
-        # 每个循环的 _0000 档案代表分析时刻，足以构成历史风场时间轴；
-        # 不应随机读取排序后的最后一个档案，也不应扫描同一循环的全部预报时效。
-        analysis_files = [
-            path for path in wrf_files
-            if os.path.basename(path).lower().endswith("_0000.grib2")
-        ]
-        if not analysis_files:
-            analysis_files = wrf_files
-        analysis_files = sorted(analysis_files, reverse=True)
-        # 注意：此處「不」依 required_hours 截斷檔案清單。
-        # 若只讀取覆蓋回溯窗口的最新檔案，會使 WRF 時間軸起點被推後，
-        # 連帶讓 available_start = max(POM_start, WRF_start) 失真，
-        # 導致使用者無法選擇較早的起算時間（誤判為「超出資料範圍」）。
-        # 因此改為載入完整分析時刻，確保時間軸反映真實資料範圍。
-
-        records = []
-        failures = []
-        for path in analysis_files:
-            try:
-                ds = xr.open_dataset(
-                    path,
-                    engine="cfgrib",
-                    decode_times=True,
-                    backend_kwargs={
-                        "filter_by_keys": {
-                            "typeOfLevel": "heightAboveGround",
-                            "level": 10,
-                        },
-                        "indexpath": "",
-                    },
-                )
-                u_name = _pick_first_from_candidates(
-                    ["u10", "10u", "u"], list(ds.data_vars)
-                )
-                v_name = _pick_first_from_candidates(
-                    ["v10", "10v", "v"], list(ds.data_vars)
-                )
-                lat_name = _pick_first_from_candidates(
-                    ["latitude", "lat"], list(ds.variables)
-                )
-                lon_name = _pick_first_from_candidates(
-                    ["longitude", "lon"], list(ds.variables)
-                )
-                time_name = _pick_first_from_candidates(
-                    ["valid_time", "time"], list(ds.variables)
-                )
-                if not u_name or not v_name or not lat_name or not lon_name:
-                    raise ValueError(
-                        f"缺少 10 米 U/V 或经纬度；变量={list(ds.variables)}"
-                    )
-                lat_vals = np.asarray(ds[lat_name].values, dtype=np.float32)
-                lon_vals = np.asarray(ds[lon_name].values, dtype=np.float32)
-                ua = _as_time_space_array(ds[u_name]).astype(np.float32)
-                va = _as_time_space_array(ds[v_name]).astype(np.float32)
-                if ua.shape != va.shape:
-                    raise ValueError(f"U/V 形状不一致：{ua.shape} / {va.shape}")
-                time_value = ds[time_name].values
-                if np.asarray(time_value).size != 1:
-                    time_value = np.asarray(time_value).reshape(-1)[0]
-                records.append((
-                    pd.Timestamp(time_value).to_datetime64(),
-                    lat_vals,
-                    lon_vals,
-                    ua[0],
-                    va[0],
-                    path,
-                ))
-                wind_path = path
-                ds.close()
-            except Exception as exc:
-                failures.append(f"{os.path.basename(path)}: {exc}")
-
-        if not records:
-            sample_failures = "；".join(failures[:5]) or "没有可用诊断"
-            st.error(
-                f"WRF 风场读取失败：扫描 {len(wrf_files)} 个 GRIB2，"
-                f"筛选了 {len(analysis_files)} 个分析时刻档案，但找不到可配对的 "
-                f"10 米 u10/v10。代表性错误：{sample_failures}"
-            )
-            st.stop()
-
-        records.sort(key=lambda item: item[0])
-        unique_records = []
-        seen_times = set()
-        for item in records:
-            if item[0] not in seen_times:
-                unique_records.append(item)
-                seen_times.add(item[0])
-        # 注意：此處「不」依 required_hours 截斷記錄。
-        # 保留完整時間軸，使 available_start 反映真實資料開端，
-        # 讓使用者能自由選擇回溯起算時間。
-
-        wind_times = [item[0] for item in unique_records]
-        wind_u = np.stack([item[3] for item in unique_records]).astype(np.float32)
-        wind_v = np.stack([item[4] for item in unique_records]).astype(np.float32)
-        wind_lat = unique_records[-1][1]
-        wind_lon = unique_records[-1][2]
-        dt_hours = (
-            float(np.median(np.diff(pd.to_datetime(wind_times).astype("int64"))) / 3.6e12)
-            if len(wind_times) > 1 else 1.0
-        )
-        wind_gaps = np.diff(pd.to_datetime(wind_times).astype("int64")) / 3.6e12
-        if len(wind_gaps) and float(np.max(wind_gaps)) > max(dt_hours * 1.5, dt_hours + 1e-6):
-            st.error(
-                "WRF 分析时次不连续："
-                f"中位间隔 {dt_hours:.1f} 小时，最大间隔 {float(np.max(wind_gaps)):.1f} 小时。"
-                "请检查 _0000 档案是否缺档，程序不会用跨缺档资料继续模拟。"
-            )
-            st.stop()
-        spatial_index = build_curvilinear_index(wind_lat, wind_lon)
-        wind_data = {
-            "lat": wind_lat,
-            "lon": wind_lon,
-            "u": np.nan_to_num(wind_u),
-            "v": np.nan_to_num(wind_v),
-            "n_times": len(wind_times),
-            "dt_hours": max(dt_hours, 1e-6),
-            "time_start_utc": _safe_time_to_datetime(wind_times[0]),
-            "time_end_utc": _safe_time_to_datetime(wind_times[-1]),
-            "units": {"u": "m s-1", "v": "m s-1"},
-            "time_interval_hours": dt_hours,
-            "selection_rule": "filename suffix _0000.grib2 + 10 m heightAboveGround u10/v10",
-            "missing_fraction": float(
-                np.mean(~np.isfinite(wind_u) | ~np.isfinite(wind_v))
-            ),
-            "max_speed_mps": float(np.nanmax(np.hypot(wind_u, wind_v))),
-            "spatial_index": spatial_index,
-            "interpolation_method": (
-                "curvilinear cKDTree nearest-neighbor"
-                if spatial_index is not None
-                else "curvilinear axis approximation"
-            ),
-        }
-
-    curr["time_start_utc"] = _safe_time_to_datetime(ds_ocean[ocean_time_name].min().values)
-    curr["time_end_utc"] = _safe_time_to_datetime(ds_ocean[ocean_time_name].max().values)
-    curr["units"] = {
-        "u": str(ds_ocean[ocean_u_name].attrs.get("units", "unknown")),
-        "v": str(ds_ocean[ocean_v_name].attrs.get("units", "unknown")),
-    }
-    common_end = curr["time_end_utc"]
-    if wind_data is not None and wind_data.get("time_end_utc") is not None:
-        common_end = min(common_end, wind_data["time_end_utc"])
-    return {"curr": curr, "wind": wind_data, "ocean_file": f"{len(pom_files)} files", "wind_file": os.path.basename(wind_path) if wind_path else None,
-            "reference_time_utc": common_end}
+    return _build_providers_from_slim(need_wind, _open_nc, _landmask_from_velocity)
 
 # ============================================================
 # INTERPOLATION / ENGINE
