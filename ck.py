@@ -1720,7 +1720,7 @@ st.sidebar.subheader("2. 時間維度 (Time Dimension)")
 days = st.sidebar.slider("回溯模擬天數 (Days)", min_value=1, max_value=30, value=5)
 
 time_step_options = {"30 分鐘 (細緻) / 30 min (Fine)": 30.0, "1 小時 (標準) / 1 hr (Standard)": 60.0, "2 小時 (快速) / 2 hr (Fast)": 120.0, "3 小時 (宏觀) / 3 hr (Coarse)": 180.0}
-selected_step_label = st.sidebar.selectbox("數值積分步長 (Time Step)", list(time_step_options.keys()), index=0)
+selected_step_label = st.sidebar.selectbox("數值積分步長 (Time Step)", list(time_step_options.keys()), index=1)
 dt_mins = time_step_options[selected_step_label]
 
 # 註：total_steps 於時間視窗夾取後才計算（見下方），
@@ -2045,7 +2045,10 @@ with tab1:
         if map_view_mode == "動態軌跡回溯 (Trajectory)":
             render_trajectory_map(history_lon, history_lat, replay_step, selected_indices, particle_sites, site_kind_map)
         else:
-            current_snapshot = snapshot_at_step(plot_df, replay_step)
+            # 熱圖快照須取每顆粒子「最後一個有效（非 NaN）位置」：
+            # 觸岸/越界粒子在失效當格的 lon/lat 為 NaN，若用 snapshot_at_step
+            # 會把這些粒子整批丟棄，導致部分熱點（粒子多已觸岸）熱圖空白。
+            current_snapshot = _last_valid_snapshot(plot_df, replay_step)
             render_heatmap(current_snapshot)
 
         # 全台熱點對比分析表
