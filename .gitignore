@@ -2,8 +2,13 @@
 # 資料檔案（過大，不上傳 GitHub）
 # ============================================================
 # 精簡資料集（約 1.15 GB，由 prepare_local_data.py 產生）
-slim_data/
+# 部署分支（deploy）：僅上傳 7 天精簡資料，透過 Git LFS 追蹤
+slim_data/*
+!slim_data/pom_currents_slim.nc
+!slim_data/wrf_wind_slim.nc
 *.nc
+!slim_data/pom_currents_slim.nc
+!slim_data/wrf_wind_slim.nc
 
 # 原始資料庫（約 424 GB，通常位於外接硬碟）
 POM/
