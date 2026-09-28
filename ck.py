@@ -1375,10 +1375,33 @@ def _translate_fig_text(fig):
     for ax in (f.layout.xaxis, f.layout.yaxis):
         if ax is not None and ax.title and ax.title.text:
             ax.title.text = _tr(ax.title.text)
+    # 圖例標題（如「回溯狀態類別」）
+    if f.layout.legend and f.layout.legend.title and f.layout.legend.title.text:
+        f.layout.legend.title.text = _tr(f.layout.legend.title.text)
     # 圖例名稱（traces）
     for tr in f.data:
         if getattr(tr, "name", None):
             tr.name = _tr(tr.name)
+        # trace 的 x 值：類別軸（如 final_status）會把中文類別值放在這裡，
+        # 這些值會顯示在 x 軸刻度上。僅在元素為字串時翻譯，避免動到數值。
+        # 注意：plotly 對大型陣列會用特殊編碼（dict 形式，含 dtype/bdata），
+        # 必須排除，否則會破壞圖表資料。
+        xv = getattr(tr, "x", None)
+        if xv is not None and not isinstance(xv, dict):
+            try:
+                xlist = list(xv)
+                if xlist and all(isinstance(v, str) for v in xlist):
+                    tr.x = tuple(_tr(v) for v in xlist)
+            except (TypeError, IndexError, KeyError):
+                pass
+    # 軸刻度標籤（類別軸，如 final_status 的類別值）
+    for ax in (f.layout.xaxis, f.layout.yaxis):
+        if ax is None:
+            continue
+        if getattr(ax, "ticktext", None):
+            ax.ticktext = tuple(_tr(t) for t in ax.ticktext)
+        if getattr(ax, "categoryarray", None):
+            ax.categoryarray = tuple(_tr(t) for t in ax.categoryarray)
     # 註解（如 50% 判定線）
     if f.layout.annotations:
         for ann in f.layout.annotations:
