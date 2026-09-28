@@ -7,8 +7,11 @@
 # --- 網頁應用框架 ---
 streamlit>=1.40
 pydeck>=0.9
-plotly>=5.20
-kaleido>=0.2   # plotly 靜態圖片匯出（PNG/PDF），供研究成果圖表下載
+# plotly 5.x + kaleido 0.2.1：kaleido 0.2.1 內建 Chromium，
+# 無需系統安裝 Chrome，Streamlit Cloud 上可穩定匯出 PNG。
+# （plotly 6.x 需搭配 kaleido>=1.0，而後者需外部 Chrome，雲端易失敗）
+plotly>=5.20,<6
+kaleido==0.2.1
 
 # --- 地理空間 / 海岸線遮罩 ---
 cartopy>=0.23
