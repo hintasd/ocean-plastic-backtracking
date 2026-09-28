@@ -437,16 +437,31 @@ def build_public_coastline_mask(lat, lon, return_geometry=False):
     if not HAS_COASTLINE_MASK:
         raise RuntimeError("当前 Python 环境没有 cartopy/shapely，无法建立公开海岸线遮罩")
 
-    land_path = os.path.join(
-        str(cartopy.config["data_dir"]),
-        "shapefiles",
-        "natural_earth",
-        "physical",
-        "ne_10m_land.shp",
-    )
-    if not os.path.isfile(land_path):
+    # 依序尋找海岸線資料：
+    #   1) 專案內打包的 cartopy_data/（部署環境用，確保雲端可用）
+    #   2) Cartopy 預設資料目錄（本機開發環境）
+    candidate_paths = [
+        os.path.join(
+            BASE_DIR,
+            "cartopy_data",
+            "shapefiles",
+            "natural_earth",
+            "physical",
+            "ne_10m_land.shp",
+        ),
+        os.path.join(
+            str(cartopy.config["data_dir"]),
+            "shapefiles",
+            "natural_earth",
+            "physical",
+            "ne_10m_land.shp",
+        ),
+    ]
+    land_path = next((p for p in candidate_paths if os.path.isfile(p)), None)
+    if land_path is None:
         raise FileNotFoundError(
-            f"找不到本机 Natural Earth 海岸线资料：{land_path}；"
+            "找不到 Natural Earth 海岸线资料（已检查专案内 cartopy_data/ 与 "
+            f"Cartopy 预设目录 {cartopy.config['data_dir']}）；"
             "为避免不可追溯下载，程序不会自动联网取得资料。"
         )
 
