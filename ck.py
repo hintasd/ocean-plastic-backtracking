@@ -1320,6 +1320,73 @@ def run_sensitivity_sweep(param_name, param_values, base_kwargs, release_sites,
     return pd.DataFrame(rows)
 
 
+# 匯出 PNG 用的中→英對照表。
+# 原因：Streamlit Cloud（Linux 容器）的 kaleido/Chromium 環境缺少中文字型，
+# 直接匯出會讓所有中文變成「豆腐塊」（□）。網頁顯示不受影響（瀏覽器有字型），
+# 但後端渲染的 PNG 會壞掉。故匯出前先將圖表文字換成英文，確保 PNG 可讀。
+_PNG_TEXT_MAP = {
+    # 標題
+    "漂流總里程分佈 (Travel Distance Distribution)": "Travel Distance Distribution",
+    "粒子最終來源歸宿分佈 (Particle Fate / Origin Distribution)": "Particle Fate / Origin Distribution",
+    # 軸標籤
+    "漂流距離 (km)": "Travel Distance (km)",
+    "粒子數量": "Particle Count",
+    "回溯狀態類別": "Backtracking Status",
+    "本地源佔比 (%)": "Local Source Fraction (%)",
+    # 圖例 / 註解
+    "本地源佔比": "Local Source Fraction",
+    "95% 信賴區間": "95% Confidence Interval",
+    "50% 判定線": "50% Decision Line",
+    # 敏感度曲線標題前綴（動態組字，於下方以 replace 處理）
+    "敏感度曲線：": "Sensitivity Curve: ",
+    # 敏感度掃描參數名稱（動態 _label）
+    "海面風阻係數 (Windage %)": "Windage (%)",
+    "本地源關聯半徑 (Local Radius km)": "Local Radius (km)",
+    "回溯天數 (Days)": "Backtracking Days",
+    "數值積分步長 (Time Step min)": "Time Step (min)",
+    # 狀態類別（legend 會用到）
+    "外海漂流中 (Offshore Active)": "Offshore Active",
+    "沿岸陸源釋放 (Terrestrial Origin)": "Terrestrial Origin",
+    "超出模擬邊界 (Out of Bounds)": "Out of Bounds",
+    "資料時間軸耗盡 (Time Exceeded)": "Time Exceeded",
+}
+
+
+def _translate_fig_text(fig):
+    """回傳一個「文字已英文化」的圖表副本，供 PNG 匯出使用。
+
+    僅複製圖表物件並替換文字，不影響網頁上顯示的原始圖表。
+    """
+    import copy as _copy
+    f = _copy.deepcopy(fig)
+
+    def _tr(s):
+        if not isinstance(s, str):
+            return s
+        for zh, en in _PNG_TEXT_MAP.items():
+            if zh in s:
+                s = s.replace(zh, en)
+        return s
+
+    # 標題
+    if f.layout.title and f.layout.title.text:
+        f.layout.title.text = _tr(f.layout.title.text)
+    # 軸標題
+    for ax in (f.layout.xaxis, f.layout.yaxis):
+        if ax is not None and ax.title and ax.title.text:
+            ax.title.text = _tr(ax.title.text)
+    # 圖例名稱（traces）
+    for tr in f.data:
+        if getattr(tr, "name", None):
+            tr.name = _tr(tr.name)
+    # 註解（如 50% 判定線）
+    if f.layout.annotations:
+        for ann in f.layout.annotations:
+            if getattr(ann, "text", None):
+                ann.text = _tr(ann.text)
+    return f
+
+
 def fig_to_png_bytes(fig, width=1400, height=800, scale=2):
     """將 plotly 圖表轉為 PNG 位元組，供 st.download_button 下載。
 
@@ -1327,11 +1394,15 @@ def fig_to_png_bytes(fig, width=1400, height=800, scale=2):
       復賽報告「研究成果」需附具體圖表。使用者可直接從系統匯出高解析度
       PNG（scale=2 即 2 倍解析度，適合列印），無須手動截圖。
 
+    中文處理：雲端 kaleido/Chromium 缺中文字型，故匯出前先將圖表文字
+      英文化（見 _translate_fig_text），避免 PNG 出現「豆腐塊」。
+
     依賴：kaleido（plotly 靜態圖片引擎）。若未安裝則回傳 None，
     呼叫端應顯示提示而非崩潰。
     """
     try:
-        return fig.to_image(format="png", width=width, height=height, scale=scale)
+        export_fig = _translate_fig_text(fig)
+        return export_fig.to_image(format="png", width=width, height=height, scale=scale)
     except Exception:
         return None
 
