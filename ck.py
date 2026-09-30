@@ -2167,7 +2167,8 @@ with tab1:
 
         # 收合式數據匯出器
         with st.expander("匯出本次模擬完整數值結果 (Export Dataset CSV)"):
-            csv_data = df_ready.to_csv(index=False).encode("utf-8")
+            # 使用 utf-8-sig（含 BOM），確保 Excel 開啟時中文不亂碼
+            csv_data = df_ready.to_csv(index=False).encode("utf-8-sig")
             st.download_button("下載完整軌跡 CSV (Download CSV)", csv_data, "nodass_backtracking_results.csv", use_container_width=True)
             st.dataframe(df_ready.head(100), use_container_width=True, height=220)
 
